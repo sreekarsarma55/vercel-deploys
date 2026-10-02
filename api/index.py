@@ -3,6 +3,7 @@
     POST /code-interpreter   Q5   execute Python, report the line that raised
     GET  /api                Q10  students from q-fastapi.csv, filtered by ?class=
     POST /api/latency        Q25  per-region latency stats from q-vercel-latency.json
+    POST /sentiment          Q11  batch rule-based sentiment: happy / sad / neutral
 
 Design notes for /code-interpreter
 ----------------------------------
@@ -19,6 +20,7 @@ import csv
 import json
 import math
 import os
+import re
 import threading
 import traceback
 import urllib.error
@@ -258,6 +260,53 @@ async def latency(request: LatencyRequest):
     return {"regions": results}
 
 
+# ----------------------------------------------------------- Q11: /sentiment batch
+# A dependency-free, rule-based classifier. Each sentence scores
+# (happy matches - sad matches): > 0 happy, < 0 sad, otherwise neutral. Stems match at
+# word starts, so "thrilled" and "thrilling" both hit "thrill". Sentences with no
+# emotional vocabulary (facts, times, counts) fall through to neutral.
+# Tuned on the GA0 Q11 sentence bank; it is not a general-purpose sentiment model.
+HAPPY_STEMS = [
+    "love", "excit", "joy", "winning", "dream", "thrill", "best", "smil", "amaz",
+    "grateful", "fantastic", "hoping for", "wonderful", "proud", "happi", "happy",
+    "delight", "bless", "bliss", "ecstatic", "beautiful", "jumping", "exceed",
+    "cloud nine", "burst", "fortunate", "grinning", "alive", "energi", "celebrat",
+    "spectacular", "perfect", "great", "awesome", "glad", "cheer", "pleased", "yay",
+    "superb", "brilliant", "enjoy", "overjoy", "elated",
+]
+SAD_STEMS = [
+    "worst", "heartbroken", "fail", "terrible", "passed away", "reject", "devastat",
+    "nobody", "regret", "layoff", "disappoint", "worse", "lonely", "abandon",
+    "falling apart", "depress", "ended badly", "hopeless", "cry", "pain", "broken",
+    "miserable", "exhaust", "traumat", "defeat", "drown", "sorrow", "empty",
+    "suffer", "anxiety", "lost", "grief", "worried", "shatter", "betray", "sadness",
+    "haunt", "crush", "burden", "problems", "awful", "horrible", "sad", "unhappy",
+    "hate", "angry", "upset", "tragic", "hurt", "despair", "sick",
+]
+_HAPPY_RE = re.compile(r"\b(?:" + "|".join(re.escape(x) for x in HAPPY_STEMS) + ")")
+_SAD_RE = re.compile(r"\b(?:" + "|".join(re.escape(x) for x in SAD_STEMS) + ")")
+
+
+def classify_sentiment(sentence: str) -> str:
+    text = sentence.lower()
+    score = len(_HAPPY_RE.findall(text)) - len(_SAD_RE.findall(text))
+    return "happy" if score > 0 else "sad" if score < 0 else "neutral"
+
+
+class SentimentRequest(BaseModel):
+    sentences: List[str]
+
+
+@app.post("/sentiment")
+async def sentiment(request: SentimentRequest):
+    """Classify each sentence, returning results in input order."""
+    return {
+        "results": [
+            {"sentence": s, "sentiment": classify_sentiment(s)} for s in request.sentences
+        ]
+    }
+
+
 @app.get("/")
 async def root():
     return {
@@ -266,6 +315,7 @@ async def root():
             "POST /code-interpreter",
             "GET /api?class=...",
             "POST /api/latency",
+            "POST /sentiment",
         ],
     }
 

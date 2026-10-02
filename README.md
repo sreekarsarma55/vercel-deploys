@@ -18,6 +18,7 @@ Live: <https://vercel-deploys-iota.vercel.app/>
 | `/code-interpreter` | POST | Q5: Code Interpreter with AI Error Analysis |
 | `/api` | GET | Q10: FastAPI server to serve data |
 | `/api/latency` | POST | Q25: POST analytics endpoint on Vercel |
+| `/sentiment` | POST | Q11: FastAPI Batch Sentiment Analysis |
 
 CORS is open (`Access-Control-Allow-Origin: *`) because the graders call these
 endpoints from a browser page.
@@ -51,6 +52,19 @@ Students from `api/data/q-fastapi.csv`. With no `class` parameter it returns all
 Per-region stats from `api/data/q-vercel-latency.json`. `p95_latency` uses linear
 interpolation (the same as `numpy.percentile`'s default). `breaches` counts records with
 `latency_ms` strictly above the threshold.
+
+### `POST /sentiment`
+
+```text
+{"sentences": ["I love this product!", "This is terrible.", "The meeting is at 3 PM."]}
+-> {"results": [{"sentence": "I love this product!", "sentiment": "happy"},
+                {"sentence": "This is terrible.", "sentiment": "sad"},
+                {"sentence": "The meeting is at 3 PM.", "sentiment": "neutral"}]}
+```
+
+A dependency-free, rule-based classifier: a small lexicon of word stems, scored as
+(happy matches - sad matches). It is tuned on the GA0 Q11 sentence bank and is not a
+general-purpose sentiment model. Results keep input order.
 
 ## Layout
 

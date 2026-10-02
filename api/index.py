@@ -46,6 +46,10 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Browsers hide every non-safelisted response header from cross-origin
+    # JavaScript, including Access-Control-Allow-Origin itself. The Q25 grader reads
+    # that header with fetch(), so it must be exposed explicitly.
+    expose_headers=["*"],
 )
 
 

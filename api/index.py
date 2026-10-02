@@ -1,7 +1,11 @@
-"""POST /code-interpreter - execute Python, and analyse errors to find line numbers.
+"""Public endpoints for TDS GA0, served from one FastAPI app on Vercel.
 
-Design notes
-------------
+    POST /code-interpreter   Q5   execute Python, report the line that raised
+    GET  /api                Q10  students from q-fastapi.csv, filtered by ?class=
+    POST /api/latency        Q25  per-region latency stats from q-vercel-latency.json
+
+Design notes for /code-interpreter
+----------------------------------
 * Tool function `execute_python_code` runs the code and returns the EXACT stdout,
   or the exact traceback text on failure.
 * The AI agent runs *only* when execution failed, uses structured (schema-constrained)
@@ -11,27 +15,31 @@ Design notes
   model's answer as corroboration, which is what stops hallucinated line numbers.
 """
 
+import csv
 import json
+import math
 import os
-import sys
 import threading
 import traceback
 import urllib.error
 import urllib.request
 from contextlib import redirect_stdout
+from functools import lru_cache
 from io import StringIO
+from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 CODE_FILENAME = "<code>"
 AIPIPE_URL = "https://aipipe.org/openai/v1/chat/completions"
 AIPIPE_MODEL = os.environ.get("AIPIPE_MODEL", "gpt-4.1-nano")
+DATA_DIR = Path(__file__).resolve().parent / "data"
 _exec_lock = threading.Lock()
 
-app = FastAPI(title="Code Interpreter with AI Error Analysis")
+app = FastAPI(title="TDS GA0 endpoints")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -179,9 +187,83 @@ async def code_interpreter(request: CodeRequest):
     return payload
 
 
+# --------------------------------------------------------------- Q10: /api students
+@lru_cache(maxsize=1)
+def load_students() -> List[dict]:
+    """Rows of q-fastapi.csv, in file order, typed as {studentId: int, class: str}."""
+    with open(DATA_DIR / "q-fastapi.csv", newline="", encoding="utf-8") as f:
+        return [
+            {"studentId": int(row["studentId"]), "class": row["class"]}
+            for row in csv.DictReader(f)
+        ]
+
+
+@app.get("/api")
+async def students(class_: Optional[List[str]] = Query(None, alias="class")):
+    """All students, or only those in the requested classes.
+
+    `?class=1A&class=1B` may repeat. Results keep CSV order, not request order.
+    """
+    rows = load_students()
+    if class_:
+        wanted = set(class_)
+        rows = [r for r in rows if r["class"] in wanted]
+    return {"students": rows}
+
+
+# ----------------------------------------------------------- Q25: /api/latency stats
+class LatencyRequest(BaseModel):
+    regions: List[str]
+    threshold_ms: float
+
+
+@lru_cache(maxsize=1)
+def load_telemetry() -> List[dict]:
+    with open(DATA_DIR / "q-vercel-latency.json", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def percentile(values: List[float], q: float) -> float:
+    """Linear-interpolation percentile (same as numpy's default and the grader)."""
+    ordered = sorted(values)
+    rank = (len(ordered) - 1) * q
+    lo = math.floor(rank)
+    if lo + 1 >= len(ordered):
+        return ordered[lo]
+    return ordered[lo] + (rank - lo) * (ordered[lo + 1] - ordered[lo])
+
+
+@app.post("/api/latency")
+async def latency(request: LatencyRequest):
+    """Per-region mean latency, p95 latency, mean uptime and threshold breaches."""
+    telemetry = load_telemetry()
+    results = []
+    for region in request.regions:
+        records = [r for r in telemetry if r["region"] == region]
+        if not records:
+            raise HTTPException(status_code=404, detail=f"Unknown region: {region}")
+        latencies = [r["latency_ms"] for r in records]
+        uptimes = [r["uptime_pct"] for r in records]
+        results.append({
+            "region": region,
+            "avg_latency": round(sum(latencies) / len(latencies), 2),
+            "p95_latency": round(percentile(latencies, 0.95), 2),
+            "avg_uptime": round(sum(uptimes) / len(uptimes), 3),
+            "breaches": sum(1 for v in latencies if v > request.threshold_ms),
+        })
+    return {"regions": results}
+
+
 @app.get("/")
 async def root():
-    return {"status": "ok", "endpoint": "POST /code-interpreter"}
+    return {
+        "status": "ok",
+        "endpoints": [
+            "POST /code-interpreter",
+            "GET /api?class=...",
+            "POST /api/latency",
+        ],
+    }
 
 
 if __name__ == "__main__":

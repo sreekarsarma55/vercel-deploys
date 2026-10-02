@@ -1,0 +1,49 @@
+name: Smoke test
+
+# Runs on every push to main and on demand. TDS GA0 Q13 checks the most recent
+# run for a step whose name contains the student's email address.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 23f3002028@ds.study.iitm.ac.in
+        run: echo "TDS GA0 Q13 - GitHub Action for 23f3002028@ds.study.iitm.ac.in"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Import the app and exercise every endpoint
+        run: |
+          uv run --with fastapi --with httpx python - <<'EOF'
+          import sys
+          sys.path.insert(0, "api")
+          from fastapi.testclient import TestClient
+          from index import app
+
+          client = TestClient(app)
+          assert client.get("/").json()["status"] == "ok"
+
+          r = client.post("/code-interpreter", json={"code": "print(1 + 1)"}).json()
+          assert r == {"error": [], "result": "2\n"}, r
+
+          r = client.post("/code-interpreter", json={"code": "x = 1\ny = x / 0"}).json()
+          assert r["error"] == [2], r
+
+          everyone = client.get("/api").json()["students"]
+          assert len(everyone) == 2000, len(everyone)
+          one = everyone[0]["class"]
+          subset = client.get("/api", params={"class": one}).json()["students"]
+          assert subset and all(s["class"] == one for s in subset)
+
+          r = client.post("/api/latency", json={"regions": ["apac"], "threshold_ms": 160}).json()
+          assert r["regions"][0]["region"] == "apac", r
+          print("all endpoints OK")
+          EOF

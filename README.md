@@ -1,6 +1,6 @@
 # vercel-deploys
 
-Public HTTP endpoints for TDS (Tools in Data Science, IITM BS) assignments, served by
+Public HTTP endpoints for TDS (Tools in Data Science, IITM BS) assignments (GA0, GA1), served by
 one FastAPI app on Vercel.
 
 The app sits at the **repo root** and deploys from **`main`**, so Vercel needs no Root
@@ -12,13 +12,16 @@ Live: <https://vercel-deploys-iota.vercel.app/>
 
 ## Endpoints
 
-| Path | Method | GA0 question |
+| Path | Method | Question |
 |---|---|---|
 | `/` | GET | health check, lists the endpoints |
 | `/code-interpreter` | POST | Q5: Code Interpreter with AI Error Analysis |
 | `/api` | GET | Q10: FastAPI server to serve data |
 | `/api/latency` | POST | Q25: POST analytics endpoint on Vercel |
 | `/sentiment` | POST | Q11: FastAPI Batch Sentiment Analysis |
+| `/effective-config` | GET | GA1 Q6: 12-factor config precedence (`?set=key=value` overrides) |
+| `/mcp` | POST | GA1 Q14: live MCP server, tool `solve_challenge` |
+| `/ledger` | POST | GA1 Q15: plain-English questions over the order ledger |
 
 CORS is open (`Access-Control-Allow-Origin: *`) because the graders call these
 endpoints from a browser page.

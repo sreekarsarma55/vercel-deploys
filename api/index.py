@@ -1,9 +1,12 @@
-"""Public endpoints for TDS GA0, served from one FastAPI app on Vercel.
+"""Public endpoints for TDS GA0 and GA1, served from one FastAPI app on Vercel.
 
     POST /code-interpreter   Q5   execute Python, report the line that raised
     GET  /api                Q10  students from q-fastapi.csv, filtered by ?class=
     POST /api/latency        Q25  per-region latency stats from q-vercel-latency.json
     POST /sentiment          Q11  batch rule-based sentiment: happy / sad / neutral
+    GET  /effective-config   GA1 Q6   layered 12-factor config with ?set= overrides
+    POST /mcp                GA1 Q14  MCP server with one tool, solve_challenge
+    POST /ledger             GA1 Q15  plain-English questions over the order ledger
 
 Design notes for /code-interpreter
 ----------------------------------
@@ -17,6 +20,7 @@ Design notes for /code-interpreter
 """
 
 import csv
+import hashlib
 import json
 import math
 import os
@@ -25,14 +29,17 @@ import threading
 import traceback
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from io import StringIO
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 CODE_FILENAME = "<code>"
@@ -41,7 +48,7 @@ AIPIPE_MODEL = os.environ.get("AIPIPE_MODEL", "gpt-4.1-nano")
 DATA_DIR = Path(__file__).resolve().parent / "data"
 _exec_lock = threading.Lock()
 
-app = FastAPI(title="TDS GA0 endpoints")
+app = FastAPI(title="TDS GA0 + GA1 endpoints")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -307,6 +314,247 @@ async def sentiment(request: SentimentRequest):
     }
 
 
+# =============================================================================== GA1
+GA1_DIR = DATA_DIR / "ga1"
+
+
+# ------------------------------------------------- GA1 Q6: /effective-config (12-factor)
+# Precedence, low -> high: defaults, config.<env>.yaml, .env, OS env (APP_*), ?set=k=v.
+CFG_KEYS = ["port", "workers", "debug", "log_level", "api_key"]
+CFG_DEFAULTS = {"port": 8000, "workers": 1, "debug": False, "log_level": "info",
+                "api_key": "default-secret-000"}
+CFG_ALIASES = {"num_workers": "workers"}
+
+
+def _cfg_key(k: str) -> str:
+    """APP_LOG_LEVEL -> log_level, NUM_WORKERS -> workers."""
+    k = k.strip().lower()
+    if k.startswith("app_"):
+        k = k[4:]
+    return CFG_ALIASES.get(k, k)
+
+
+def _cfg_coerce(k, v):
+    if k in ("port", "workers"):
+        return int(v)
+    if k == "debug":
+        return v if isinstance(v, bool) else str(v).strip().lower() in ("true", "1", "yes", "on")
+    return str(v)
+
+
+def _read_kv(path: Path, sep: str) -> dict:
+    """Flat `key: value` YAML / `KEY=value` dotenv reader (no PyYAML dependency)."""
+    out = {}
+    if path.exists():
+        for line in path.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line and sep in line:
+                k, v = line.split(sep, 1)
+                out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def _cfg_layers() -> list:
+    env = os.environ.get("APP_ENV", "development")
+    yaml_layer = _read_kv(GA1_DIR / "config" / f"config.{env}.yaml", ":")
+    dotenv = _read_kv(GA1_DIR / "config" / "dot.env", "=")   # the .env file (renamed: deploy tools skip dotfiles)
+    # OS layer: real APP_* variables win; with none set (fresh Vercel project) use config/os.env,
+    # which records the OS environment this deployment is assigned.
+    osenv = {k: v for k, v in os.environ.items() if k.startswith("APP_") and k != "APP_ENV"}
+    if not osenv:
+        osenv = _read_kv(GA1_DIR / "config" / "os.env", "=")
+    return [yaml_layer, dotenv, osenv]
+
+
+@app.get("/effective-config")
+async def effective_config(set_: List[str] = Query(default=[], alias="set")):
+    merged = dict(CFG_DEFAULTS)
+    for layer in _cfg_layers():
+        for k, v in layer.items():
+            merged[_cfg_key(k)] = v
+    for item in set_:                       # CLI overrides, highest precedence
+        if "=" in item:
+            k, v = item.split("=", 1)
+            merged[_cfg_key(k)] = v
+    out = {k: _cfg_coerce(k, merged[k]) for k in CFG_KEYS}
+    out["api_key"] = "****"                 # never expose the secret
+    return out
+
+
+# ------------------------------------------------------------ GA1 Q14: /mcp (MCP server)
+# Minimal Streamable-HTTP MCP server: JSON-RPC over POST, JSON responses, no SSE stream.
+MCP_EMAIL = "23f3002028@ds.study.iitm.ac.in".strip().lower()
+MCP_TOOL = {
+    "name": "solve_challenge",
+    "description": "Return the first 16 hex chars of SHA-256('<X-Exam-Challenge>:<email>').",
+    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+}
+
+
+def _rpc(id_, result=None, error=None):
+    body = {"jsonrpc": "2.0", "id": id_}
+    body["error" if error else "result"] = error or result
+    return body
+
+
+def _mcp_handle(msg: dict, request: Request):
+    method, id_ = msg.get("method"), msg.get("id")
+    if id_ is None:                         # notification (e.g. notifications/initialized): no reply
+        return None
+    if method == "initialize":
+        return _rpc(id_, {
+            "protocolVersion": (msg.get("params") or {}).get("protocolVersion", "2025-06-18"),
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "tds-ga1-mcp", "version": "1.0.0"},
+        })
+    if method == "ping":
+        return _rpc(id_, {})
+    if method == "tools/list":
+        return _rpc(id_, {"tools": [MCP_TOOL]})
+    if method == "tools/call":
+        name = (msg.get("params") or {}).get("name")
+        if name != MCP_TOOL["name"]:
+            return _rpc(id_, error={"code": -32602, "message": f"Unknown tool: {name}"})
+        challenge = request.headers.get("x-exam-challenge", "")   # read from HTTP headers, not the body
+        if not challenge:
+            return _rpc(id_, {"content": [{"type": "text", "text": "missing X-Exam-Challenge header"}],
+                              "isError": True})
+        digest = hashlib.sha256(f"{challenge}:{MCP_EMAIL}".encode()).hexdigest()[:16]
+        return _rpc(id_, {"content": [{"type": "text", "text": digest}], "isError": False})
+    return _rpc(id_, error={"code": -32601, "message": f"Method not found: {method}"})
+
+
+@app.post("/mcp")
+async def mcp(request: Request):
+    msg = await request.json()
+    if isinstance(msg, list):               # JSON-RPC batch
+        replies = [r for r in (_mcp_handle(m, request) for m in msg) if r is not None]
+        return JSONResponse(replies) if replies else Response(status_code=202)
+    reply = _mcp_handle(msg, request)
+    if reply is None:
+        return Response(status_code=202)
+    headers = {"Mcp-Session-Id": "ga1-stateless"} if msg.get("method") == "initialize" else None
+    return JSONResponse(reply, headers=headers)
+
+
+@app.get("/mcp")
+async def mcp_get():
+    return Response(status_code=405, headers={"Allow": "POST"})   # no server-initiated stream
+
+
+# --------------------------------------------------------- GA1 Q15: /ledger (ledger agent)
+# Rules from the API's own notes: business dates are Asia/Kolkata; a repeated order id's latest
+# updated_at row is current; only status 'paid' is revenue. Money is converted with /rates.
+# Questions are parsed with keyword rules (no LLM): every answer is computed, never generated.
+IST = timezone(timedelta(hours=5, minutes=30))
+_MONTHS = {m: i for i, m in enumerate(["january", "february", "march", "april", "may", "june", "july",
+                                       "august", "september", "october", "november", "december"], 1)}
+_MONTHS.update({k[:3]: v for k, v in list(_MONTHS.items())})
+
+
+def _ts(s: str) -> datetime:
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+@lru_cache(maxsize=1)
+def load_ledger():
+    usd = json.loads((GA1_DIR / "ledger" / "rates.json").read_text())["usd_per_unit"]
+    current = {}
+    for line in (GA1_DIR / "ledger" / "export.ndjson").read_text().splitlines():
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        prev = current.get(r["id"])
+        if prev is None or _ts(r["updated_at"]) > _ts(prev["updated_at"]):
+            current[r["id"]] = r
+    orders = []
+    for r in current.values():
+        local = _ts(r["created_at"]).astimezone(IST)
+        orders.append({**r, "year": local.year, "month": local.month, "usd": r["amount"] * usd[r["currency"]]})
+    regions = sorted({o["region"] for o in orders})
+    products = sorted({o["product"] for o in orders}, key=len, reverse=True)   # longest name first
+    return orders, regions, products
+
+
+def _find(q: str, options):
+    for o in options:
+        if re.search(r"\b" + re.escape(o.lower()) + r"s?\b", q.lower()):
+            return o
+    return None
+
+
+def _month(q: str):
+    m = re.search(r"\b(" + "|".join(_MONTHS) + r")\w*\.?\s*,?\s*(20\d\d)\b", q.lower())
+    if m:
+        return int(m.group(2)), _MONTHS[m.group(1)]
+    m = re.search(r"\b(20\d\d)-(\d\d)\b", q)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def parse_ledger_question(q: str) -> dict:
+    _, regions, products = load_ledger()
+    ql = q.lower()
+    p = {"region": _find(q, regions), "product": _find(q, products), "month": _month(q)}
+    if re.search(r"\b(customers?|buyers?|clients?)\b", ql):
+        p["intent"] = "distinct_customers"
+    elif "refund" in ql:
+        money = re.search(r"\b(how much|amount|value|usd|dollars?)\b", ql)
+        count = re.search(r"\b(how many|count|number of)\b", ql)
+        p["intent"] = "refund_amount" if money and not count else "refund_count"
+    elif re.search(r"\b(top|best|most|highest|leading)\b", ql) and re.search(r"product|item|sell", ql):
+        p["intent"] = "top_product"
+    elif re.search(r"\b(average|avg|mean|typical)\b", ql) or "per order" in ql:
+        p["intent"] = "avg_order"
+    elif re.search(r"\b(how many|count|number of)\b", ql):
+        p["intent"] = "order_count"
+    else:
+        p["intent"] = "revenue"
+    return p
+
+
+def answer_ledger_question(q: str):
+    orders, _, _ = load_ledger()
+    p = parse_ledger_question(q)
+
+    def select(status):
+        out = [o for o in orders if o["status"] == status]
+        if p["region"]:
+            out = [o for o in out if o["region"] == p["region"]]
+        if p["product"] and p["intent"] != "top_product":
+            out = [o for o in out if o["product"] == p["product"]]
+        if p["month"]:
+            out = [o for o in out if (o["year"], o["month"]) == p["month"]]
+        return out
+
+    i = p["intent"]
+    if i == "refund_count":
+        return len(select("refunded"))
+    if i == "refund_amount":
+        return round(sum(o["usd"] for o in select("refunded")), 2)
+    paid = select("paid")
+    if i == "distinct_customers":
+        return len({o["customer"] for o in paid})
+    if i == "top_product":
+        by = defaultdict(float)
+        for o in paid:
+            by[o["product"]] += o["usd"]
+        return max(sorted(by), key=lambda k: by[k]) if by else None
+    if i == "avg_order":
+        return round(sum(o["usd"] for o in paid) / len(paid), 2) if paid else 0
+    if i == "order_count":
+        return len(paid)
+    return round(sum(o["usd"] for o in paid), 2)
+
+
+class LedgerQuestion(BaseModel):
+    question: str
+
+
+@app.post("/ledger")
+async def ledger(request: LedgerQuestion):
+    return {"answer": answer_ledger_question(request.question)}
+
+
 @app.get("/")
 async def root():
     return {
@@ -316,6 +564,9 @@ async def root():
             "GET /api?class=...",
             "POST /api/latency",
             "POST /sentiment",
+            "GET /effective-config?set=key=value",
+            "POST /mcp",
+            "POST /ledger",
         ],
     }
 

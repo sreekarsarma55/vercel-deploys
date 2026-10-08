@@ -45,5 +45,14 @@ jobs:
 
           r = client.post("/api/latency", json={"regions": ["apac"], "threshold_ms": 160}).json()
           assert r["regions"][0]["region"] == "apac", r
+          cfg = client.get("/effective-config", params=[("set", "port=9000"), ("set", "debug=true")]).json()
+          assert cfg == {"port": 9000, "workers": 1, "debug": True, "log_level": "warning", "api_key": "****"}, cfg
+
+          assert client.post("/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"}).status_code == 202
+          tools = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).json()
+          assert tools["result"]["tools"][0]["name"] == "solve_challenge", tools
+
+          r = client.post("/ledger", json={"question": "How much did South earn in January 2026, in US dollars?"}).json()
+          assert r == {"answer": 42596.36}, r
           print("all endpoints OK")
           EOF

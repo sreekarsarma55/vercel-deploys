@@ -54,5 +54,39 @@ jobs:
 
           r = client.post("/ledger", json={"question": "How much did South earn in January 2026, in US dollars?"}).json()
           assert r == {"answer": 42596.36}, r
+          st = client.get("/stats", params={"values": "1,2,3,4"}).json()
+          assert st["count"] == 4 and st["sum"] == 10 and st["mean"] == 2.5, st
+          pre = client.options("/stats", headers={"Origin": "https://dash-mwnied.example.com"})
+          assert pre.headers.get("access-control-allow-origin") == "https://dash-mwnied.example.com"
+          evil = client.options("/stats", headers={"Origin": "https://evil.example"})
+          assert evil.headers.get("access-control-allow-origin") is None
+
+          assert client.post("/verify", json={"token": "bad.token.here"}).status_code == 401
+
+          assert client.post("/analytics", json={"events": []}).status_code == 401
+          an = client.post("/analytics", headers={"X-API-Key": "ak_qlfueyhzeaogfn8ryjnb7c0h"},
+                           json={"events": [{"user": "a", "amount": 10}, {"user": "b", "amount": -5}]}).json()
+          assert an["revenue"] == 10 and an["unique_users"] == 2 and an["top_user"] == "a", an
+
+          assert client.get("/work", params={"n": 3}).json()["done"] == 3
+          assert "http_requests_total" in client.get("/metrics").text
+          assert client.get("/healthz").json()["status"] == "ok"
+          assert all({"level", "ts", "path", "request_id"} <= set(e) for e in client.get("/logs/tail").json())
+
+          ex = client.post("/extract", json={"text": "Vendor: Acme-1234 Industries Ltd.\nTotal due: USD 1200.50\nPayment due 2026-03-14"}).json()
+          assert ex["currency"] == "USD" and abs(ex["amount"] - 1200.50) < 0.01 and ex["date"] == "2026-03-14", ex
+          assert client.post("/extract", json={"text": ""}).status_code == 422
+
+          o1 = client.post("/orders", json={"amount": 1}, headers={"Idempotency-Key": "k1"}).json()
+          o2 = client.post("/orders", json={"amount": 1}, headers={"Idempotency-Key": "k1"}).json()
+          assert o1["id"] == o2["id"], (o1, o2)
+          page = client.get("/orders", params={"limit": 10}).json()
+          assert len(page["items"]) == 10 and page["next_cursor"] == "11", page
+
+          pg = client.get("/ping", headers={"X-Request-ID": "rid-1"})
+          assert pg.json()["request_id"] == "rid-1" and pg.headers["x-request-id"] == "rid-1"
+
+          assert client.get("/ga2/stream").json()["A"]["complete"] is True
+          assert client.get("/ga2/cache").json()["B"]["steps"] == ["L1", "L2", "L3", "L4", "L5"]
           print("all endpoints OK")
           EOF

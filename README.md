@@ -1,6 +1,6 @@
 # vercel-deploys
 
-Public HTTP endpoints for TDS (Tools in Data Science, IITM BS) assignments (GA0, GA1), served by
+Public HTTP endpoints for TDS (Tools in Data Science, IITM BS) assignments (GA0, GA1, GA2), served by
 one FastAPI app on Vercel.
 
 The app sits at the **repo root** and deploys from **`main`**, so Vercel needs no Root
@@ -22,9 +22,17 @@ Live: <https://vercel-deploys-iota.vercel.app/>
 | `/effective-config` | GET | GA1 Q6: 12-factor config precedence (`?set=key=value` overrides) |
 | `/mcp` | POST | GA1 Q14: live MCP server, tool `solve_challenge` |
 | `/ledger` | POST | GA1 Q15: plain-English questions over the order ledger |
+| `/stats` | GET | GA2 Q3: descriptive stats behind a strict per-origin CORS policy |
+| `/verify` | POST | GA2 Q4: RS256 JWT verification (pure-Python, no crypto deps) |
+| `/analytics` | POST | GA2 Q7: API-key auth + event aggregation |
+| `/work`, `/metrics`, `/healthz`, `/logs/tail` | GET | GA2 Q8: observability |
+| `/extract` | POST | GA2 Q10: invoice field extraction |
+| `/orders` | POST, GET | GA2 Q11: idempotency, cursor pagination, per-client rate limit |
+| `/ping` | GET | GA2 Q12: request-id propagation + per-client rate limit |
+| `/ga2/stream`, `/ga2/cache` | GET | GA2 Q13, Q14: precomputed JSON answers |
 
-CORS is open (`Access-Control-Allow-Origin: *`) because the graders call these
-endpoints from a browser page.
+CORS is open (`Access-Control-Allow-Origin: *`) on every path except `/stats` and `/ping`,
+which answer only their assigned origin because GA2 grades that policy explicitly.
 
 ### `POST /code-interpreter`
 

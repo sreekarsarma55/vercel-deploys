@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 try:  # Vercel imports api/index.py as a module; local `python api/index.py` uses a script path.
     from .ga3 import install_ga3_routes
@@ -947,6 +947,12 @@ async def ga2_stream():
 @app.get("/ga2/cache")
 async def ga2_cache():
     return _ga2_answer("cache.json")
+
+
+@app.get("/ga3/kim-novak-face.glb")
+async def kim_novak_face():
+    """Public, CORS-enabled GLB submitted for the GA3 face-model validity check."""
+    return FileResponse(DATA_DIR / "kim-novak-face.glb", media_type="model/gltf-binary")
 
 
 @app.get("/")

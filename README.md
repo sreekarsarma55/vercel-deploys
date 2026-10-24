@@ -1,6 +1,6 @@
 # vercel-deploys
 
-Public HTTP endpoints for TDS (Tools in Data Science, IITM BS) assignments (GA0, GA1, GA2), served by
+Public HTTP endpoints for TDS (Tools in Data Science, IITM BS) assignments (GA0–GA3), served by
 one FastAPI app on Vercel.
 
 The app sits at the **repo root** and deploys from **`main`**, so Vercel needs no Root
@@ -30,6 +30,9 @@ Live: <https://vercel-deploys-iota.vercel.app/>
 | `/orders` | POST, GET | GA2 Q11: idempotency, cursor pagination, per-client rate limit |
 | `/ping` | GET | GA2 Q12: request-id propagation + per-client rate limit |
 | `/ga2/stream`, `/ga2/cache` | GET | GA2 Q13, Q14: precomputed JSON answers |
+| `/.well-known/agent-card.json`, `/a2a/*` | GET, POST | GA3: A2A invoice-action agent |
+| `/v1/mailroom/actions` | POST | GA3: receipt-gated mailroom action agent |
+| `/v2/incidents`, `/v2/incidents/{runId}/*` | POST, GET | GA3: incident-response agent with OTLP trace |
 
 CORS is open (`Access-Control-Allow-Origin: *`) on every path except `/stats` and `/ping`,
 which answer only their assigned origin because GA2 grades that policy explicitly.
@@ -103,6 +106,8 @@ account's GA0.
 |---|---|---|
 | `AIPIPE_TOKEN` | `/code-interpreter` | enables the AI error analyst; responses gain `ai_error_lines` and `ai_agreed` |
 | `AIPIPE_MODEL` | `/code-interpreter` | model for the analyst, default `gpt-4.1-nano` |
+| `GA3_MODEL` | GA3 agents | model for invoice, mailroom, and incident planning, default `gpt-4.1-nano` |
+| `PUBLIC_ORIGIN` | GA3 A2A card | public production origin, default is this Vercel deployment |
 
 Without a token the endpoint still reports error lines, taken from the real traceback.
 

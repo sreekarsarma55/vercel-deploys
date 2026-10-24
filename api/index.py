@@ -53,6 +53,10 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
+try:  # Vercel imports api/index.py as a module; local `python api/index.py` uses a script path.
+    from .ga3 import install_ga3_routes
+except ImportError:  # pragma: no cover - the direct-script convenience path
+    from ga3 import install_ga3_routes
 
 CODE_FILENAME = "<code>"
 AIPIPE_URL = "https://aipipe.org/openai/v1/chat/completions"
@@ -60,7 +64,8 @@ AIPIPE_MODEL = os.environ.get("AIPIPE_MODEL", "gpt-4.1-nano")
 DATA_DIR = Path(__file__).resolve().parent / "data"
 _exec_lock = threading.Lock()
 
-app = FastAPI(title="TDS GA0 + GA1 + GA2 endpoints")
+app = FastAPI(title="TDS GA0 + GA1 + GA2 + GA3 endpoints")
+install_ga3_routes(app, os.environ.get("PUBLIC_ORIGIN", "https://vercel-deploys-iota.vercel.app"))
 # CORS is handled by ga2_middleware() below: wildcard everywhere (the GA0/GA1 graders need
 # that, and GA0 Q25 even reads Access-Control-Allow-Origin from JS) except the GA2 paths
 # that must answer exactly one assigned origin.
@@ -960,6 +965,8 @@ async def root():
             "GET /work?n=5", "GET /metrics", "GET /healthz", "GET /logs/tail?limit=20",
             "POST /extract", "POST /orders", "GET /orders?limit=10", "GET /ping",
             "GET /ga2/stream", "GET /ga2/cache",
+            "GET /.well-known/agent-card.json", "POST /a2a/message:send", "GET /a2a/tasks",
+            "POST /v1/mailroom/actions", "POST /v2/incidents", "GET /v2/incidents/{runId}",
         ],
     }
 

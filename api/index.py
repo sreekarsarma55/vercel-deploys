@@ -955,6 +955,12 @@ async def kim_novak_face():
     return FileResponse(DATA_DIR / "kim-novak-face.glb", media_type="model/gltf-binary")
 
 
+@app.get("/ga3/face-morph.webm")
+async def face_morph_video():
+    """Public, CORS-enabled morph video (Sirusho -> Carol Burnett) for the GA3 morph question."""
+    return FileResponse(DATA_DIR / "face-morph.webm", media_type="video/webm")
+
+
 @app.get("/")
 async def root():
     return {

@@ -174,10 +174,20 @@ def _llm_blocking(system, user, max_tokens, timeout):
         return None, type(exc).__name__
 
 
+LLM_STATUS = []
+
+
 async def llm_json(system, user, max_tokens=4000, timeout=30):
     result, status = await asyncio.to_thread(_llm_blocking, system, user, max_tokens, timeout)
     log("GA3_LLM", {"status": status, "model": MODEL, "chars": len(user)})
+    LLM_STATUS.append({"at": now_iso(), "status": status, "chars": len(user)})
+    del LLM_STATUS[:-20]
     return result if isinstance(result, dict) else None
+
+
+def redact(obj):
+    """Copy of obj with vault canaries masked (debug captures only)."""
+    return json.loads(re.sub(r"VLT-[A-Za-z0-9]+", "VLT-REDACTED", json.dumps(obj)))
 
 
 def json_response(body, status=200, media="application/json"):
@@ -570,7 +580,7 @@ def mail_parse(dos):
     if ev_line and em.group(3) == "delivery_window":
         same_src = [ln for ln in D.lines if ln["source"] == ev_line["source"]]
         pol, _ = D.find(r"verified carrier event may update", provs=TRUSTED)
-        ev = [ln["id"] for ln in same_src] + ([pol["id"]] if pol else [])
+        ev = {"src": [ln["id"] for ln in same_src], "policy": [pol["id"]] if pol else []}
         return ("update", "update_internal_record", {"kind": "case_record", "id": em.group(2).upper()},
                 {"field": "delivery_window", "sourceEventId": em.group(1).upper(), "value": em.group(4)}, ev)
 
@@ -582,7 +592,8 @@ def mail_parse(dos):
         who, _ = D.find(rf"I am {re.escape(claimed)}")
         sup, _ = D.find(r"no signed approval or verified account challenge")
         pol, _ = D.find(r"sender identity conflicts|ask the owning approval queue", provs=TRUSTED)
-        ev = [mis["id"]] + [x["id"] for x in (who, sup, pol) if x]
+        ev = {"record": [mis["id"]], "who": [who["id"]] if who else [], "sup": [sup["id"]] if sup else [],
+              "policy": [pol["id"]] if pol else []}
         return ("confirm", "request_confirmation", {"kind": "approval_queue", "id": mm.group(3)},
                 {"claimedSender": claimed, "questionCode": "VERIFY_REQUEST", "referenceId": mm.group(1).upper()}, ev)
 
@@ -595,10 +606,10 @@ def mail_parse(dos):
                          r"exactly|currently has the customer-visible status) " + QUOTED, provs=TRUSTED)
         pol, _ = D.find(r"create a draft in the owning mailbox", provs=TRUSTED)
         if rec:
-            ev = [ask["id"], gate["id"], rec["id"]] + ([pol["id"]] if pol else [])
+            ev = {"ask": [ask["id"]], "gate": [gate["id"]], "rec": [rec["id"]], "policy": [pol["id"]] if pol else []}
             return ("draft", "create_draft", {"kind": "draft_queue", "id": f"mailbox:{D.mailbox}"},
                     {"recipient": _clean_email(gm.group(1)), "referenceId": order, "status": rm.group(1),
-                     "template": "order_status"}, list(dict.fromkeys(ev)))
+                     "template": "order_status"}, ev)
     if approval_decoy:
         return None  # an approval exists but does not match: let the model weigh the rest
     return None
@@ -682,13 +693,33 @@ def mail_safe_fallback(D, allowed):
     return "no_action", None, {"reasonCode": "INFORMATIONAL", "referenceId": ref}, ev
 
 
+# Evidence roles per case type. Variant "A" is the default; "B" is cited for the first
+# PROBE[arch] core dossiers (sorted by id) so one Check measures which set is minimal.
+EVIDENCE_RULES = {
+    "update": {"A": ["src", "policy"], "B": ["src"]},
+    "confirm": {"A": ["record", "who", "sup", "policy"], "B": ["record", "who", "policy"]},
+    "draft": {"A": ["ask", "gate", "rec", "policy"], "B": ["gate", "rec", "policy"]},
+}
+PROBE = {"update": 99, "confirm": 5, "draft": 2}
+MAIL_CACHE = "mail:dec5:"
+
+
+def select_evidence(arch, roles, variant):
+    if isinstance(roles, list):
+        return list(dict.fromkeys(roles))
+    picked = []
+    for role in EVIDENCE_RULES[arch][variant]:
+        picked += roles.get(role, [])
+    return list(dict.fromkeys(picked)) or list(dict.fromkeys(i for v in roles.values() for i in v))
+
+
 async def mail_plan(dossiers, allowed):
     """Proposal per dossier: cache -> parser -> model -> least-privilege fallback."""
-    out, todo = {}, []
+    out, todo, parsed_core = {}, [], {}
     for d in dossiers:
         D = Dossier(d)
-        fp = sha("mail-v3", d)
-        cached = KV.get("mail:dec:" + fp)
+        fp = sha("mail-v3", d)   # callId seed: stays stable across code versions
+        cached = KV.get(MAIL_CACHE + fp)
         if cached:
             out[D.id] = cached
             continue
@@ -696,10 +727,19 @@ async def mail_plan(dossiers, allowed):
         if parsed and parsed[1] in allowed:
             arche, action, target, payload, ev = parsed
             out[D.id] = {"archetype": arche, "action": action, "target": target, "payload": payload,
-                         "evidence": list(dict.fromkeys(ev)), "source": "parser", "fp": fp}
-            KV.set("mail:dec:" + fp, out[D.id])
+                         "roles": ev, "source": "parser", "fp": fp, "variant": "A"}
+            if d.get("partition") == "stable_core" and arche in PROBE:
+                parsed_core.setdefault(arche, []).append(D.id)
         else:
             todo.append((D, fp))
+    for arche, ids in parsed_core.items():
+        for i in sorted(ids)[:PROBE[arche]]:
+            out[i]["variant"] = "B"
+    for d in dossiers:
+        p = out.get(d["dossierId"])
+        if p and "roles" in p:
+            p["evidence"] = select_evidence(p["archetype"], p.pop("roles"), p["variant"])
+            KV.set(MAIL_CACHE + p["fp"], p)
     if todo:
         def render(D):
             src = []
@@ -726,12 +766,11 @@ async def mail_plan(dossiers, allowed):
                 checked, source = mail_safe_fallback(D, allowed), "fallback"
             action, target, payload, ev = checked
             out[D.id] = {"archetype": "unknown", "action": action, "target": target, "payload": payload,
-                         "evidence": ev, "source": source, "fp": fp}
+                         "evidence": ev, "source": source, "fp": fp, "variant": "-"}
             if source == "model":
-                KV.set("mail:dec:" + fp, out[D.id])
-            else:
-                KV.push("debug:mail:unknown", {"dossier": json.loads(re.sub(
-                    r"VLT-[A-Za-z0-9]+", "VLT-REDACTED", json.dumps(D.raw)))}, keep=20)
+                KV.set(MAIL_CACHE + fp, out[D.id])
+            KV.push("debug:mail:unknown", redact({"dossier": D.raw, "modelRaw": by_id.get(D.id),
+                                                  "final": out[D.id]}), keep=16)
     return out
 
 
@@ -949,19 +988,31 @@ def install_ga3_routes(app, public_origin):
     origin = public_origin.rstrip("/")
 
     # ------------------------------------------------------------------ debug
+    def debug_allowed(request):
+        key = os.environ.get("GA3_DEBUG_KEY")
+        return not key or request.query_params.get("key") == key
+
     @app.get("/ga3/debug")
     async def ga3_debug(request: Request):
-        key = os.environ.get("GA3_DEBUG_KEY")
-        full = bool(key) and request.query_params.get("key") == key
         out = {"store": "redis" if KV.remote else "memory", "model": MODEL,
                "llmToken": bool(os.environ.get("AIPIPE_TOKEN") or os.environ.get("OPENAI_API_KEY")),
-               "mail": KV.get("debug:mail:verdicts") or [], "a2a": KV.get("debug:a2a:verdicts") or [],
+               "llmCalls": LLM_STATUS[-10:],
+               "mail": [{k: v for k, v in e.items() if k != "dossiers"} for e in KV.get("debug:mail:verdicts") or []],
+               "a2a": KV.get("debug:a2a:verdicts") or [],
                "incident": KV.get("debug:incident:runs") or []}
-        if full:
-            out["mailUnknown"] = KV.get("debug:mail:unknown") or []
-            out["a2aUnknown"] = KV.get("debug:a2a:unknown") or []
-            out["incidentRequests"] = KV.get("debug:incident:requests") or []
         return json_response(out)
+
+    @app.get("/ga3/debug/{what}")
+    async def ga3_debug_dump(what: str, request: Request):
+        """Raw captures (canaries/sensitive values redacted): mail, mailverdicts, a2a, incident."""
+        if not debug_allowed(request):
+            return json_response({"error": "key required"}, 403)
+        keys = {"mail": "debug:mail:proposes", "mailverdicts": "debug:mail:verdicts", "mailcore": "debug:mail:core",
+                "a2a": "debug:a2a:batches", "a2aunknown": "debug:a2a:unknown",
+                "incident": "debug:incident:requests", "mailunknown": "debug:mail:unknown"}
+        if what not in keys:
+            return json_response({"error": "unknown", "options": sorted(keys)}, 404)
+        return json_response(KV.get(keys[what]) or [])
 
     # ==================================================================== A2A
     def card():
@@ -1098,6 +1149,11 @@ def install_ga3_routes(app, public_origin):
         for pid, pkg in zip(ids, packages):
             if decisions[pid].get("source") != "parser":
                 KV.push("debug:a2a:unknown", {"package": pkg, "decision": decisions[pid]}, keep=10)
+        KV.push("debug:a2a:batches", {"task": task_id, "at": now_iso(), "batchId": batch_id,
+                                      "policyRevision": data.get("policyRevision"),
+                                      "packages": packages[:3] if len(packages) > 6 else packages,
+                                      "decisions": {pid: {k: decisions[pid][k] for k in ("action", "source", "evidenceRefs", "facts")}
+                                                    for pid in ids}}, keep=8)
         return _a2a_out({"task": task})
 
     async def a2a_continue(who, message, mkey, fingerprint):
@@ -1251,8 +1307,14 @@ def install_ga3_routes(app, public_origin):
             KV.set(ekey, {"proposeHash": body_hash, "inputDigest": input_digest, "verifier": verifier,
                           "proposals": proposals, "proposeResponse": response,
                           "meta": {d["dossierId"]: [plans[d["dossierId"]]["archetype"], plans[d["dossierId"]]["source"],
-                                                    d.get("partition")] for d in dossiers},
+                                                    d.get("partition"), plans[d["dossierId"]].get("variant")]
+                                   for d in dossiers},
                           "commitHash": None, "commitResponse": None})
+            KV.push("debug:mail:proposes", redact({
+                "evaluationId": eval_id, "at": now_iso(),
+                "audit": [d for d in dossiers if d.get("partition") != "stable_core"],
+                "proposals": proposals}), keep=4)
+            KV.set("debug:mail:core", redact([d for d in dossiers if d.get("partition") == "stable_core"]))
             return json_response(response)
 
     async def mail_commit(body, eval_id):
@@ -1299,10 +1361,11 @@ def install_ga3_routes(app, public_origin):
             verdicts = [{"id": o["dossierId"], "arch": (meta.get(o["dossierId"]) or ["?"])[0],
                          "src": (meta.get(o["dossierId"]) or ["?", "?"])[1],
                          "part": (meta.get(o["dossierId"]) or ["?", "?", "?"])[2],
+                         "var": (meta.get(o["dossierId"]) or ["?"] * 4)[3],
                          "ok": o["status"] == "executed"} for o in outcomes]
             summary = {}
             for v in verdicts:
-                s = summary.setdefault(v["arch"], [0, 0])
+                s = summary.setdefault(f"{v['arch']}/{v['var']}/{v['part']}", [0, 0])
                 s[0] += v["ok"]
                 s[1] += 1
             KV.push("debug:mail:verdicts", {"evaluationId": eval_id, "at": now_iso(), "byArchetype": summary,

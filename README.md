@@ -106,8 +106,18 @@ account's GA0.
 |---|---|---|
 | `AIPIPE_TOKEN` | `/code-interpreter` | enables the AI error analyst; responses gain `ai_error_lines` and `ai_agreed` |
 | `AIPIPE_MODEL` | `/code-interpreter` | model for the analyst, default `gpt-4.1-nano` |
-| `GA3_MODEL` | GA3 agents | model for invoice, mailroom, and incident planning, default `gpt-4.1-nano` |
+| `GA3_MODEL` | GA3 agents | model for case files the template parsers don't recognise, default `gpt-4.1-mini` |
 | `PUBLIC_ORIGIN` | GA3 A2A card | public production origin, default is this Vercel deployment |
+| `KV_REST_API_URL`, `KV_REST_API_TOKEN` | GA3 agents | optional Upstash Redis for durable task state (in-memory otherwise) |
+| `GA3_DEBUG_KEY` | `/ga3/debug` | unlocks raw unrecognised payloads; the verdict summary is always shown |
+
+### GA3 agents
+
+`api/ga3.py` holds the three agents. Each one reads the case files' operative sentences with exact
+parsers and copies values verbatim. Unrecognised case files go to the model, and code validates
+its answer against the document. Hashing, replay, conflicts, receipts and OTLP traces never call
+the model. After a Check, `GET /ga3/debug` shows which proposals the grader accepted, grouped by
+case type.
 
 Without a token the endpoint still reports error lines, taken from the real traceback.
 
